@@ -239,12 +239,18 @@ function spawnInitialTraffic(count) {
     perLane[i % state.lanes].push(i);
   }
 
+  // every car must be able to reach an exit, so keep initial spawn positions
+  // from landing past the last one (when exits exist)
+  const maxSpawnPos = state.exitPositions.length > 0
+    ? Math.max(0, Math.min(state.roadLength * 0.95, state.exitPositions[state.exitPositions.length - 1] - 150))
+    : state.roadLength * 0.95;
+
   perLane.forEach((indices, lane) => {
     const n = indices.length;
     indices.forEach((idx, k) => {
       const slot = (k + 1) / (n + 1);
       const jitter = (Math.random() - 0.5) * (state.roadLength / (n + 2)) * 0.5;
-      let position = clampNum(state.roadLength * slot * 0.9 + jitter, 0, state.roadLength * 0.95);
+      let position = clampNum(state.roadLength * slot * 0.9 + jitter, 0, maxSpawnPos);
       const desiredMph = state.speedLimitMph * (0.88 + Math.random() * 0.2);
       const exitDistance = pickRandomExitFor(position);
       const car = new Car(state.nextCarId++, lane, position, desiredMph, desiredMph, exitDistance, randomColor());
@@ -253,13 +259,14 @@ function spawnInitialTraffic(count) {
   });
 }
 
+// Every car must leave via an exit, so this always assigns one of the exits
+// still ahead of `startPosition`. Only returns null if none exist (no exits
+// configured at all, or the car has already passed the last one) - the sole
+// case where driving to the end of the road is unavoidable.
 function pickRandomExitFor(startPosition) {
   const validExits = state.exitPositions.filter(e => e > startPosition + 100);
-  // ~60% of cars have a designated exit, rest drive to the end
-  if (validExits.length > 0 && Math.random() < 0.6) {
-    return validExits[Math.floor(Math.random() * validExits.length)];
-  }
-  return null;
+  if (validExits.length === 0) return null;
+  return validExits[Math.floor(Math.random() * validExits.length)];
 }
 
 function clampInt(v, min, max) {
@@ -286,13 +293,18 @@ function populateSpawnLaneOptions() {
   }
 }
 
+// Every car must leave via an exit, so "drive to end of road" is only offered
+// when the road genuinely has no exits configured to pick from.
 function populateSpawnExitOptions() {
   const sel = document.getElementById('spawnExit');
   sel.innerHTML = '';
-  const endOpt = document.createElement('option');
-  endOpt.value = 'end';
-  endOpt.textContent = 'Drive to end of road';
-  sel.appendChild(endOpt);
+  if (state.exitPositions.length === 0) {
+    const endOpt = document.createElement('option');
+    endOpt.value = 'end';
+    endOpt.textContent = 'Drive to end of road (no exits configured)';
+    sel.appendChild(endOpt);
+    return;
+  }
   state.exitPositions.forEach((pos, i) => {
     const opt = document.createElement('option');
     opt.value = pos;
@@ -438,29 +450,20 @@ function updateLaneDecision(car, cars) {
     }
   }
 
-  // 3. Return to the right once you're not actually gaining on the lane to your right.
+  // 3. Return to the right once you're not actually gaining on the car ahead
+  // of you in that lane. This is the general "passing lane" contract for any
+  // lane change to the left: you moved over to get past whoever was blocking
+  // you, and you stay only as long as you're genuinely faster than whoever is
+  // now the next car up in the lane to your right - which is either the car
+  // you're still overtaking, or (once you've cleared it) the next one worth
+  // passing before you have to get back over. Applies to every lane, not just
+  // the designated passing lane, so any leftward move is always purposeful.
   if (!blocked && car.lane < state.lanes - 1) {
-    if (car.lane === 0 && state.passingOnly) {
-      // Strict passing-lane rule: only stay here while you're genuinely faster
-      // than the car ahead of you in the lane to the right. The moment you're
-      // not - because you haven't caught up to anyone, or you just passed
-      // someone and the next car up isn't slower than you - get back over.
-      const rightLeader = findLeader(car, 1, cars);
-      const isPassing = rightLeader !== null && car.speed > rightLeader.speed + PASS_SPEED_MARGIN;
-      if (!isPassing && canChangeTo(car, 1, cars)) {
-        car.lane = 1;
-        car.laneChangeCooldown = LANE_CHANGE_COOLDOWN;
-      }
-    } else {
-      // General keep-right courtesy elsewhere (gentler when passing-only is off)
-      const rightBiasThreshold = state.passingOnly ? -1.5 : -0.15;
-      if (canChangeTo(car, car.lane + 1, cars)) {
-        const targetGain = laneChangeAccelGain(car, car.lane + 1, cars);
-        if (targetGain > rightBiasThreshold) {
-          car.lane += 1;
-          car.laneChangeCooldown = LANE_CHANGE_COOLDOWN;
-        }
-      }
+    const rightLeader = findLeader(car, car.lane + 1, cars);
+    const isPassing = rightLeader !== null && car.speed > rightLeader.speed + PASS_SPEED_MARGIN;
+    if (!isPassing && canChangeTo(car, car.lane + 1, cars)) {
+      car.lane += 1;
+      car.laneChangeCooldown = LANE_CHANGE_COOLDOWN;
     }
   }
 }
@@ -542,7 +545,9 @@ function step(dt) {
         car.braking = false;
         car.brakeIntensity = 0;
       } else {
-        car.exitDistance = null; // missed it, continue to end
+        // missed this one - every car must exit somewhere, so aim for the next
+        // exit ahead instead of giving up; only null if none remain
+        car.exitDistance = pickRandomExitFor(car.position);
       }
     }
   }
@@ -959,6 +964,42 @@ chartCanvas.addEventListener('mouseleave', () => {
   hoverX = null;
   chartTooltip.style.display = 'none';
 });
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function exportChartAsPng() {
+  chartCanvas.toBlob(blob => downloadBlob(blob, `traffic-health-${Math.round(simClock)}s.png`));
+}
+
+function exportChartAsCsv() {
+  const lines = [];
+  const laneCols = Array.from({ length: state.lanes }, (_, i) => `lane_${i + 1}_mph`);
+  lines.push(['time_s', ...laneCols].join(','));
+  for (const sample of state.laneSpeedHistory) {
+    const row = [sample.t.toFixed(2), ...sample.speeds.map(v => (v === null ? '' : v.toFixed(1)))];
+    lines.push(row.join(','));
+  }
+  lines.push('');
+  lines.push('event_time_s,type,label,detail');
+  for (const ev of state.events) {
+    const detail = `"${ev.detail.replace(/"/g, '""')}"`;
+    lines.push([ev.t.toFixed(2), ev.type, ev.label, detail].join(','));
+  }
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  downloadBlob(blob, `traffic-health-${Math.round(simClock)}s.csv`);
+}
+
+document.getElementById('exportChartPngBtn').addEventListener('click', exportChartAsPng);
+document.getElementById('exportChartCsvBtn').addEventListener('click', exportChartAsCsv);
 
 /* ---------- Main loop ---------- */
 let lastTime = null;
