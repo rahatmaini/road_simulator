@@ -239,3 +239,64 @@ canvas {
   background: #ff2222;
   box-shadow: 0 0 6px 2px rgba(255, 34, 34, 0.7);
 }
+
+#chartPanel {
+  grid-column: 1 / -1;
+}
+
+.chart-subtitle {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  margin: -6px 0 12px 0;
+}
+
+.chart-wrap {
+  position: relative;
+}
+
+.chart-tooltip {
+  display: none;
+  position: absolute;
+  background: rgba(15, 20, 32, 0.92);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--text);
+  pointer-events: none;
+  max-width: 220px;
+  z-index: 2;
+}
+
+.chart-tooltip b {
+  color: var(--text);
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 10px;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-swatch {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.legend-swatch.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}

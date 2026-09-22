@@ -98,6 +98,16 @@
         <div><span class="swatch brake-swatch"></span> Brake lights (rear of car)</div>
       </div>
     </section>
+
+    <section class="panel" id="chartPanel">
+      <h2>Traffic Health Over Time</h2>
+      <p class="chart-subtitle">Average speed per lane. Dashed markers show when you spawned a car or changed conditions — hover one for details.</p>
+      <div class="chart-wrap">
+        <canvas id="flowChart"></canvas>
+        <div id="chartTooltip" class="chart-tooltip"></div>
+      </div>
+      <div id="chartLegend" class="chart-legend"></div>
+    </section>
   </main>
 
   <script src="app.js"></script>

@@ -14,7 +14,10 @@ const EXIT_MERGE_DISTANCE = 450;   // meters, start trying to merge right this f
 const SPAWN_CLEAR_ZONE = 25;       // meters, must be clear near x=0 to spawn
 const PASS_SPEED_MARGIN = 1.5;     // m/s, how much faster than the car being passed counts as "actually passing"
 const SPEED_MAINTAIN_DEFICIT = 2;  // m/s, how far under its target speed a car tolerates before hunting for a faster lane
-const LANE_FLOW_WINDOW = 20;       // seconds, rolling window used to smooth each lane's "cars out/sec" readout
+const CHART_WINDOW_SECONDS = 180;  // seconds of simulated time visible in the traffic-health chart
+const CHART_SAMPLE_INTERVAL = 1;   // seconds between per-lane speed samples recorded for the chart
+const MAX_EVENTS = 80;             // cap on stored condition-change markers
+const LANE_COLORS = ['#4f8cff', '#ff8c4f', '#4fd18c', '#e05c8a', '#d1c94f', '#a26fe0'];
 
 const MPH_PER_MS = 2.2369362921;   // 1 m/s in mph
 const LANE_CHANGE_ANIM_DURATION = 0.8; // seconds for the visual lane-change glide
@@ -54,11 +57,13 @@ let state = {
   passingOnly: false,
   maintainCount: false,
   pendingSpawns: 0,
-  laneExitLog: [],   // per-lane arrays of simClock timestamps when a car reached the true end of the road
   timeScale: 2,
   running: true,
   cars: [],
   nextCarId: 1,
+  laneSpeedHistory: [],  // {t, speeds: [avgMph per lane, or null if that lane was empty]}
+  chartSampleTimer: 0,
+  events: [],             // {t, type: 'settings'|'spawn'|'reset', label, detail}
 };
 
 const canvas = document.getElementById('roadCanvas');
@@ -66,6 +71,11 @@ const ctx = canvas.getContext('2d');
 const hud = document.getElementById('hud');
 const statsEl = document.getElementById('stats');
 const spawnMsg = document.getElementById('spawnMsg');
+const chartCanvas = document.getElementById('flowChart');
+const chartCtx = chartCanvas.getContext('2d');
+const chartTooltip = document.getElementById('chartTooltip');
+
+let isInitialBuild = true;
 
 /* ---------- Car ---------- */
 class Car {
@@ -131,7 +141,42 @@ function computeExitPositions(numExits, roadLength) {
   return positions;
 }
 
+// Captures the settings that matter for traffic behavior, so a rebuild can
+// report exactly what changed as a marker on the traffic-health chart.
+function snapshotSettings() {
+  return {
+    lanes: state.lanes,
+    roadLength: state.roadLength,
+    numExits: state.numExits,
+    speedLimitMph: state.speedLimitMph,
+    minGapCarLengths: state.minGapCarLengths,
+    reactionDelay: state.reactionDelay,
+    passingOnly: state.passingOnly,
+    maintainCount: state.maintainCount,
+  };
+}
+
+function diffSettings(before, after) {
+  const changes = [];
+  if (before.lanes !== after.lanes) changes.push(`Lanes ${before.lanes}\u2192${after.lanes}`);
+  if (before.roadLength !== after.roadLength) changes.push(`Road length ${before.roadLength}\u2192${after.roadLength} m`);
+  if (before.numExits !== after.numExits) changes.push(`Exits ${before.numExits}\u2192${after.numExits}`);
+  if (before.speedLimitMph !== after.speedLimitMph) changes.push(`Speed limit ${before.speedLimitMph}\u2192${after.speedLimitMph} mph`);
+  if (before.minGapCarLengths !== after.minGapCarLengths) changes.push(`Min gap ${before.minGapCarLengths}\u2192${after.minGapCarLengths} car lengths`);
+  if (before.reactionDelay !== after.reactionDelay) changes.push(`Reaction delay ${before.reactionDelay}\u2192${after.reactionDelay}s`);
+  if (before.passingOnly !== after.passingOnly) changes.push(`Passing-only lane ${before.passingOnly ? 'On' : 'Off'}\u2192${after.passingOnly ? 'On' : 'Off'}`);
+  if (before.maintainCount !== after.maintainCount) changes.push(`Keep count constant ${before.maintainCount ? 'On' : 'Off'}\u2192${after.maintainCount ? 'On' : 'Off'}`);
+  return changes;
+}
+
+function pushEvent(type, label, detail) {
+  state.events.push({ t: simClock, type, label, detail });
+  if (state.events.length > MAX_EVENTS) state.events.shift();
+}
+
 function rebuildRoad() {
+  const before = snapshotSettings();
+
   state.lanes = clampInt(document.getElementById('lanesInput').value, 1, 6);
   state.roadLength = clampInt(document.getElementById('roadLengthInput').value, 200, 50000);
   state.numExits = clampInt(document.getElementById('exitsInput').value, 0, 10);
@@ -152,7 +197,16 @@ function rebuildRoad() {
   state.exitPositions = computeExitPositions(state.numExits, state.roadLength);
 
   simClock = 0;
-  state.laneExitLog = Array.from({ length: state.lanes }, () => []);
+  state.laneSpeedHistory = [];
+  state.events = [];
+  state.chartSampleTimer = 0;
+
+  if (!isInitialBuild) {
+    const changes = diffSettings(before, snapshotSettings());
+    if (changes.length > 0) pushEvent('settings', 'Settings changed', changes.join(', '));
+  }
+  isInitialBuild = false;
+
   const carCount = clampInt(document.getElementById('carCountInput').value, 0, 300);
   state.pendingSpawns = 0;
   spawnInitialTraffic(carCount);
@@ -160,11 +214,16 @@ function rebuildRoad() {
   populateSpawnLaneOptions();
   populateSpawnExitOptions();
   resizeCanvas();
+  resizeChartCanvas();
+  updateChartLegend();
 }
 
 function resetTrafficOnly() {
   simClock = 0;
-  state.laneExitLog = Array.from({ length: state.lanes }, () => []);
+  state.laneSpeedHistory = [];
+  state.events = [];
+  state.chartSampleTimer = 0;
+  pushEvent('reset', 'Traffic reset', 'Cars respawned with current settings');
   const carCount = clampInt(document.getElementById('carCountInput').value, 0, 300);
   state.pendingSpawns = 0;
   spawnInitialTraffic(carCount);
@@ -220,8 +279,8 @@ function populateSpawnLaneOptions() {
     const opt = document.createElement('option');
     opt.value = i;
     let label = `Lane ${i + 1}`;
-    if (i === 0) label += state.lanes > 1 ? ' (leftmost' + (state.passingOnly ? ' – passing only' : '') + ')' : '';
-    if (i === state.lanes - 1 && state.lanes > 1) label += ' (rightmost – exits)';
+    if (i === 0) label += state.lanes > 1 ? ' (leftmost' + (state.passingOnly ? ' \u2013 passing only' : '') + ')' : '';
+    if (i === state.lanes - 1 && state.lanes > 1) label += ' (rightmost \u2013 exits)';
     opt.textContent = label;
     sel.appendChild(opt);
   }
@@ -252,7 +311,7 @@ function spawnManualCar() {
   // check entrance is clear
   const blocked = state.cars.some(c => c.lane === lane && c.position < SPAWN_CLEAR_ZONE);
   if (blocked) {
-    spawnMsg.textContent = 'Lane entrance is busy — try again in a moment.';
+    spawnMsg.textContent = 'Lane entrance is busy \u2014 try again in a moment.';
     spawnMsg.className = 'msg';
     return;
   }
@@ -262,6 +321,9 @@ function spawnManualCar() {
   spawnMsg.textContent = `Spawned car #${car.id} in lane ${lane + 1} at ${speedMph} mph.`;
   spawnMsg.className = 'msg ok';
   setTimeout(() => { spawnMsg.textContent = ''; }, 3000);
+
+  const exitDesc = exitDistance !== null ? `exiting at ${exitDistance} m` : 'driving to end of road';
+  pushEvent('spawn', 'Car spawned', `Lane ${lane + 1} at ${speedMph} mph, ${exitDesc}`);
 }
 
 /* ---------- Physics: IDM car-following ---------- */
@@ -490,16 +552,11 @@ function step(dt) {
     if (car.exiting) car.exitAnimTimer += dt;
   }
 
-  // remove cars that finished exiting or reached the end of the road; cars
-  // reaching the true end (not a ramp) are logged per-lane for the flow readout
+  // remove cars that finished exiting or reached the end of the road
   const beforeCount = cars.length;
   state.cars = cars.filter(car => {
     if (car.exiting) return car.exitAnimTimer < EXIT_ANIM_DURATION;
-    if (car.position >= state.roadLength) {
-      state.laneExitLog[car.lane].push(simClock);
-      return false;
-    }
-    return true;
+    return car.position < state.roadLength;
   });
   const departedCount = beforeCount - state.cars.length;
 
@@ -508,6 +565,22 @@ function step(dt) {
   }
   if (state.maintainCount && state.pendingSpawns > 0) {
     attemptAutoSpawns();
+  }
+
+  // sample each lane's average speed periodically for the traffic-health chart
+  state.chartSampleTimer += dt;
+  if (state.chartSampleTimer >= CHART_SAMPLE_INTERVAL) {
+    state.chartSampleTimer -= CHART_SAMPLE_INTERVAL;
+    const speeds = [];
+    for (let lane = 0; lane < state.lanes; lane++) {
+      const laneCars = state.cars.filter(c => !c.exiting && c.lane === lane);
+      speeds.push(laneCars.length > 0
+        ? (laneCars.reduce((s, c) => s + c.speed, 0) / laneCars.length) * MPH_PER_MS
+        : null);
+    }
+    state.laneSpeedHistory.push({ t: simClock, speeds });
+    const cutoff = simClock - CHART_WINDOW_SECONDS - 10;
+    while (state.laneSpeedHistory.length > 2 && state.laneSpeedHistory[0].t < cutoff) state.laneSpeedHistory.shift();
   }
 }
 
@@ -530,14 +603,11 @@ let canvasWidth = 900;
 let canvasHeight = 400;
 const TOP_MARGIN = 40;
 const BOTTOM_MARGIN = 50;
-const RIGHT_MARGIN = 76; // reserved for the per-lane "cars out/sec" readout at the end of each lane
 let laneHeight = 60;
-let roadPixelWidth = canvasWidth - RIGHT_MARGIN;
 
 function resizeCanvas() {
   const area = document.querySelector('.road-area');
   canvasWidth = Math.max(600, area.clientWidth - 24);
-  roadPixelWidth = canvasWidth - RIGHT_MARGIN;
   laneHeight = Math.min(70, Math.max(40, 300 / state.lanes));
   canvasHeight = TOP_MARGIN + laneHeight * state.lanes + BOTTOM_MARGIN;
   canvas.width = canvasWidth;
@@ -545,17 +615,7 @@ function resizeCanvas() {
 }
 
 function xForPosition(pos) {
-  return (pos / state.roadLength) * roadPixelWidth;
-}
-
-// Cars per second reaching the true end of the road in `lane`, smoothed over
-// LANE_FLOW_WINDOW seconds of simulated time. Prunes the log as a side effect.
-function laneFlowRate(lane) {
-  const log = state.laneExitLog[lane];
-  if (!log) return 0;
-  const cutoff = simClock - LANE_FLOW_WINDOW;
-  while (log.length > 0 && log[0] < cutoff) log.shift();
-  return log.length / LANE_FLOW_WINDOW;
+  return (pos / state.roadLength) * canvasWidth;
 }
 
 function yForLane(lane) {
@@ -567,7 +627,7 @@ function draw() {
 
   // road background
   ctx.fillStyle = '#2b2f36';
-  ctx.fillRect(0, TOP_MARGIN, roadPixelWidth, laneHeight * state.lanes);
+  ctx.fillRect(0, TOP_MARGIN, canvasWidth, laneHeight * state.lanes);
 
   // lane dividers
   for (let i = 1; i < state.lanes; i++) {
@@ -577,7 +637,7 @@ function draw() {
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(0, y);
-    ctx.lineTo(roadPixelWidth, y);
+    ctx.lineTo(canvasWidth, y);
     ctx.stroke();
   }
   ctx.setLineDash([]);
@@ -587,17 +647,17 @@ function draw() {
   ctx.lineWidth = 3;
   ctx.beginPath();
   ctx.moveTo(0, TOP_MARGIN);
-  ctx.lineTo(roadPixelWidth, TOP_MARGIN);
+  ctx.lineTo(canvasWidth, TOP_MARGIN);
   ctx.stroke();
   ctx.beginPath();
   ctx.moveTo(0, TOP_MARGIN + laneHeight * state.lanes);
-  ctx.lineTo(roadPixelWidth, TOP_MARGIN + laneHeight * state.lanes);
+  ctx.lineTo(canvasWidth, TOP_MARGIN + laneHeight * state.lanes);
   ctx.stroke();
 
   // passing-only highlight on lane 0
   if (state.passingOnly && state.lanes > 1) {
     ctx.fillStyle = 'rgba(79, 140, 255, 0.08)';
-    ctx.fillRect(0, TOP_MARGIN, roadPixelWidth, laneHeight);
+    ctx.fillRect(0, TOP_MARGIN, canvasWidth, laneHeight);
     ctx.fillStyle = 'rgba(200, 220, 255, 0.6)';
     ctx.font = '11px sans-serif';
     ctx.fillText('PASSING ONLY', 8, TOP_MARGIN + 14);
@@ -633,29 +693,13 @@ function draw() {
   ctx.lineWidth = 2;
   ctx.setLineDash([4, 4]);
   ctx.beginPath();
-  ctx.moveTo(roadPixelWidth - 2, TOP_MARGIN);
-  ctx.lineTo(roadPixelWidth - 2, bottomY);
+  ctx.moveTo(canvasWidth - 2, TOP_MARGIN);
+  ctx.lineTo(canvasWidth - 2, bottomY);
   ctx.stroke();
   ctx.setLineDash([]);
   ctx.fillStyle = '#ffffff';
   ctx.font = 'bold 11px sans-serif';
-  ctx.fillText('END', roadPixelWidth - 32, bottomY + 15);
-
-  // per-lane "cars out/sec" flow readout, at the end of each lane
-  ctx.fillStyle = 'rgba(200, 220, 255, 0.55)';
-  ctx.font = '9px sans-serif';
-  ctx.textAlign = 'left';
-  ctx.fillText('OUT/S', roadPixelWidth + 8, TOP_MARGIN - 6);
-  for (let lane = 0; lane < state.lanes; lane++) {
-    const rate = laneFlowRate(lane);
-    const y = yForLane(lane);
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
-    roundRect(ctx, roadPixelWidth + 6, y - 11, RIGHT_MARGIN - 14, 22, 4);
-    ctx.fill();
-    ctx.fillStyle = rate > 0 ? '#8fe3a0' : 'rgba(255,255,255,0.4)';
-    ctx.font = 'bold 12px sans-serif';
-    ctx.fillText(rate.toFixed(2), roadPixelWidth + 12, y + 4);
-  }
+  ctx.fillText('END', canvasWidth - 32, bottomY + 15);
 
   // cars
   for (const car of state.cars) {
@@ -743,13 +787,178 @@ function updateHudAndStats() {
     ? Math.round(state.cars.filter(c => !c.exiting).reduce((s, c) => s + c.speed, 0) / n * MPH_PER_MS)
     : 0;
   const brakingCount = state.cars.filter(c => c.braking).length;
-  const flowByLane = Array.from({ length: state.lanes }, (_, lane) => laneFlowRate(lane).toFixed(2)).join(' / ');
   statsEl.innerHTML = `<b>Cars on road:</b> ${n}<br>` +
     `<b>Average speed:</b> ${avgSpeed} mph<br>` +
     `<b>Braking now:</b> ${brakingCount}<br>` +
-    `<b>Exits:</b> ${state.numExits}<br>` +
-    `<b>Cars out/sec (by lane):</b> ${flowByLane}`;
+    `<b>Exits:</b> ${state.numExits}`;
 }
+
+/* ---------- Traffic-health chart ---------- */
+let chartWidth = 900;
+let chartHeight = 220;
+const CHART_LEFT_MARGIN = 40;
+const CHART_RIGHT_MARGIN = 12;
+const CHART_TOP_MARGIN = 16;
+const CHART_BOTTOM_MARGIN = 10;
+const EVENT_COLORS = { settings: '#ffb84f', spawn: '#a26fe0', reset: '#8a93a7' };
+const EVENT_LABELS = { settings: 'Settings changed', spawn: 'Car spawned', reset: 'Traffic reset' };
+let hoverX = null; // mouse x in chart canvas pixels, or null when not hovering
+
+function resizeChartCanvas() {
+  const wrap = document.querySelector('.chart-wrap');
+  chartWidth = Math.max(400, wrap.clientWidth - 4);
+  chartCanvas.width = chartWidth;
+  chartCanvas.height = chartHeight;
+}
+
+function chartXForTime(t, tMin, tMax) {
+  const plotW = chartWidth - CHART_LEFT_MARGIN - CHART_RIGHT_MARGIN;
+  return CHART_LEFT_MARGIN + ((t - tMin) / Math.max(1e-6, tMax - tMin)) * plotW;
+}
+
+function chartYForSpeed(speed, yMax) {
+  const plotH = chartHeight - CHART_TOP_MARGIN - CHART_BOTTOM_MARGIN;
+  return CHART_TOP_MARGIN + plotH * (1 - speed / yMax);
+}
+
+function updateChartLegend() {
+  const legend = document.getElementById('chartLegend');
+  let html = '';
+  for (let lane = 0; lane < state.lanes; lane++) {
+    html += `<span class="legend-item"><span class="legend-swatch" style="background:${LANE_COLORS[lane % LANE_COLORS.length]}"></span>Lane ${lane + 1}</span>`;
+  }
+  for (const type of ['settings', 'spawn', 'reset']) {
+    html += `<span class="legend-item"><span class="legend-swatch dot" style="background:${EVENT_COLORS[type]}"></span>${EVENT_LABELS[type]}</span>`;
+  }
+  legend.innerHTML = html;
+}
+
+function drawChart() {
+  chartCtx.clearRect(0, 0, chartWidth, chartHeight);
+
+  const tMax = Math.max(simClock, CHART_WINDOW_SECONDS * 0.05);
+  const tMin = Math.max(0, tMax - CHART_WINDOW_SECONDS);
+  const yMax = Math.max(20, state.speedLimitMph * 1.2);
+  const plotLeft = CHART_LEFT_MARGIN;
+  const plotRight = chartWidth - CHART_RIGHT_MARGIN;
+  const plotTop = CHART_TOP_MARGIN;
+  const plotBottom = chartHeight - CHART_BOTTOM_MARGIN;
+
+  chartCtx.fillStyle = 'rgba(255,255,255,0.03)';
+  chartCtx.fillRect(plotLeft, plotTop, plotRight - plotLeft, plotBottom - plotTop);
+
+  // horizontal gridlines + mph labels
+  chartCtx.strokeStyle = 'rgba(255,255,255,0.08)';
+  chartCtx.fillStyle = 'rgba(255,255,255,0.4)';
+  chartCtx.font = '10px sans-serif';
+  chartCtx.textAlign = 'right';
+  const step = yMax > 100 ? 25 : yMax > 50 ? 20 : 10;
+  for (let v = 0; v <= yMax; v += step) {
+    const y = chartYForSpeed(v, yMax);
+    chartCtx.beginPath();
+    chartCtx.moveTo(plotLeft, y);
+    chartCtx.lineTo(plotRight, y);
+    chartCtx.stroke();
+    chartCtx.fillText(String(v), plotLeft - 6, y + 3);
+  }
+  chartCtx.textAlign = 'left';
+
+  // speed-limit reference line
+  const limitY = chartYForSpeed(state.speedLimitMph, yMax);
+  chartCtx.strokeStyle = 'rgba(255, 213, 79, 0.5)';
+  chartCtx.setLineDash([4, 4]);
+  chartCtx.beginPath();
+  chartCtx.moveTo(plotLeft, limitY);
+  chartCtx.lineTo(plotRight, limitY);
+  chartCtx.stroke();
+  chartCtx.setLineDash([]);
+
+  // per-lane average-speed lines (gaps where a lane had no cars)
+  for (let lane = 0; lane < state.lanes; lane++) {
+    chartCtx.strokeStyle = LANE_COLORS[lane % LANE_COLORS.length];
+    chartCtx.lineWidth = 2;
+    chartCtx.beginPath();
+    let started = false;
+    for (const sample of state.laneSpeedHistory) {
+      if (sample.t < tMin) continue;
+      const v = sample.speeds[lane];
+      if (v === null || v === undefined) { started = false; continue; }
+      const x = chartXForTime(sample.t, tMin, tMax);
+      const y = chartYForSpeed(Math.min(v, yMax), yMax);
+      if (!started) { chartCtx.moveTo(x, y); started = true; }
+      else chartCtx.lineTo(x, y);
+    }
+    chartCtx.stroke();
+  }
+
+  // condition-change event markers
+  let hoveredEvent = null;
+  for (const ev of state.events) {
+    if (ev.t < tMin || ev.t > tMax) continue;
+    const x = chartXForTime(ev.t, tMin, tMax);
+    const color = EVENT_COLORS[ev.type] || '#ffffff';
+    chartCtx.strokeStyle = color;
+    chartCtx.globalAlpha = 0.55;
+    chartCtx.setLineDash([3, 3]);
+    chartCtx.lineWidth = 1;
+    chartCtx.beginPath();
+    chartCtx.moveTo(x, plotTop);
+    chartCtx.lineTo(x, plotBottom);
+    chartCtx.stroke();
+    chartCtx.setLineDash([]);
+    chartCtx.globalAlpha = 1;
+    chartCtx.fillStyle = color;
+    chartCtx.beginPath();
+    chartCtx.arc(x, plotTop - 5, 3.5, 0, Math.PI * 2);
+    chartCtx.fill();
+
+    if (hoverX !== null && Math.abs(hoverX - x) < 6) hoveredEvent = ev;
+  }
+
+  // hover crosshair + tooltip
+  if (hoverX !== null && hoverX >= plotLeft && hoverX <= plotRight) {
+    chartCtx.strokeStyle = 'rgba(255,255,255,0.3)';
+    chartCtx.beginPath();
+    chartCtx.moveTo(hoverX, plotTop);
+    chartCtx.lineTo(hoverX, plotBottom);
+    chartCtx.stroke();
+
+    if (hoveredEvent) {
+      chartTooltip.innerHTML = `<b>${hoveredEvent.label}</b> @ ${hoveredEvent.t.toFixed(0)}s<br>${hoveredEvent.detail}`;
+      chartTooltip.style.display = 'block';
+    } else {
+      const hoveredT = tMin + ((hoverX - plotLeft) / (plotRight - plotLeft)) * (tMax - tMin);
+      let nearest = null, nearestDist = Infinity;
+      for (const sample of state.laneSpeedHistory) {
+        const d = Math.abs(sample.t - hoveredT);
+        if (d < nearestDist) { nearestDist = d; nearest = sample; }
+      }
+      if (nearest) {
+        const lines = nearest.speeds.map((v, i) =>
+          `<span style="color:${LANE_COLORS[i % LANE_COLORS.length]}">Lane ${i + 1}: ${v !== null ? Math.round(v) + ' mph' : 'empty'}</span>`
+        ).join('<br>');
+        chartTooltip.innerHTML = `<b>t = ${nearest.t.toFixed(0)}s</b><br>${lines}`;
+        chartTooltip.style.display = 'block';
+      } else {
+        chartTooltip.style.display = 'none';
+      }
+    }
+    const tooltipLeft = Math.min(hoverX + 14, chartWidth - 170);
+    chartTooltip.style.left = tooltipLeft + 'px';
+    chartTooltip.style.top = '6px';
+  } else {
+    chartTooltip.style.display = 'none';
+  }
+}
+
+chartCanvas.addEventListener('mousemove', (e) => {
+  const rect = chartCanvas.getBoundingClientRect();
+  hoverX = (e.clientX - rect.left) * (chartCanvas.width / rect.width);
+});
+chartCanvas.addEventListener('mouseleave', () => {
+  hoverX = null;
+  chartTooltip.style.display = 'none';
+});
 
 /* ---------- Main loop ---------- */
 let lastTime = null;
@@ -763,6 +972,7 @@ function loop(timestamp) {
     step(dt * state.timeScale);
   }
   draw();
+  drawChart();
   updateHudAndStats();
   requestAnimationFrame(loop);
 }
@@ -778,7 +988,7 @@ document.getElementById('playPauseBtn').addEventListener('click', (e) => {
 
 document.getElementById('timeScaleInput').addEventListener('input', (e) => {
   state.timeScale = parseFloat(e.target.value);
-  document.getElementById('timeScaleValue').textContent = `${state.timeScale}×`;
+  document.getElementById('timeScaleValue').textContent = `${state.timeScale}\u00d7`;
 });
 
 document.getElementById('spawnBtn').addEventListener('click', spawnManualCar);
@@ -788,7 +998,10 @@ document.getElementById('passingOnlyCheckbox').addEventListener('change', (e) =>
   populateSpawnLaneOptions();
 });
 
-window.addEventListener('resize', resizeCanvas);
+window.addEventListener('resize', () => {
+  resizeCanvas();
+  resizeChartCanvas();
+});
 
 /* ---------- Init ---------- */
 rebuildRoad();
