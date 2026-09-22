@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Traffic Simulator</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>🚗 Traffic Simulator</h1>
+    <div class="header-actions">
+      <button id="playPauseBtn" class="primary">Pause</button>
+      <button id="resetBtn">Reset Traffic</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel" id="roadPanel">
+      <h2>Road Settings</h2>
+      <div class="field">
+        <label for="lanesInput">Lanes</label>
+        <input type="number" id="lanesInput" min="1" max="6" value="3">
+      </div>
+      <div class="field">
+        <label for="roadLengthInput">Road length (m)</label>
+        <input type="number" id="roadLengthInput" min="500" max="20000" step="100" value="3000">
+      </div>
+      <div class="field">
+        <label for="exitsInput">Number of exits</label>
+        <input type="number" id="exitsInput" min="0" max="10" value="3">
+      </div>
+      <div class="field">
+        <label for="carCountInput">Initial car count</label>
+        <input type="number" id="carCountInput" min="0" max="150" value="15">
+      </div>
+      <div class="field">
+        <label for="speedLimitInput">Speed limit (mph)</label>
+        <input type="number" id="speedLimitInput" min="10" max="150" step="5" value="65">
+      </div>
+      <div class="field">
+        <label for="minGapInput">Minimum gap between cars (car lengths)</label>
+        <input type="number" id="minGapInput" min="0.2" max="5" step="0.1" value="1">
+      </div>
+      <div class="field">
+        <label for="reactionDelayInput">Driver reaction delay (s) — causes phantom jams</label>
+        <input type="number" id="reactionDelayInput" min="0" max="2.5" step="0.1" value="1.0">
+      </div>
+      <div class="field checkbox-field">
+        <label>
+          <input type="checkbox" id="passingOnlyCheckbox">
+          Left lane for passing only
+        </label>
+      </div>
+      <div class="field checkbox-field">
+        <label>
+          <input type="checkbox" id="maintainCountCheckbox">
+          Keep car count constant (respawn on exit)
+        </label>
+      </div>
+      <div class="field">
+        <label for="timeScaleInput">Simulation speed: <span id="timeScaleValue">2×</span></label>
+        <input type="range" id="timeScaleInput" min="0.5" max="8" step="0.5" value="2">
+      </div>
+      <button id="applyBtn" class="primary full-width">Apply Settings &amp; Rebuild Road</button>
+    </section>
+
+    <section class="road-area">
+      <canvas id="roadCanvas"></canvas>
+      <div id="hud" class="hud"></div>
+    </section>
+
+    <section class="panel" id="spawnPanel">
+      <h2>Spawn a Car</h2>
+      <div class="field">
+        <label for="spawnLane">Lane</label>
+        <select id="spawnLane"></select>
+      </div>
+      <div class="field">
+        <label for="spawnSpeed">Speed (mph)</label>
+        <input type="number" id="spawnSpeed" min="0" max="150" step="5" value="65">
+      </div>
+      <div class="field">
+        <label for="spawnExit">Exit at</label>
+        <select id="spawnExit"></select>
+      </div>
+      <button id="spawnBtn" class="primary full-width">Spawn Car</button>
+      <p id="spawnMsg" class="msg"></p>
+
+      <h2>Live Stats</h2>
+      <div id="stats" class="stats"></div>
+
+      <h2>Legend</h2>
+      <div class="legend">
+        <div><span class="swatch car-swatch"></span> Car (label = speed in mph)</div>
+        <div><span class="swatch exit-swatch"></span> Exit ramp</div>
+        <div><span class="swatch limit-line"></span> Road end</div>
+        <div><span class="swatch brake-swatch"></span> Brake lights (rear of car)</div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
