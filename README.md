@@ -2,7 +2,7 @@
 
 A browser-based highway traffic simulator built with plain HTML/CSS/JS and an HTML5 canvas.
 
-**[Live demo](https://rahatmaini.github.io/road_simulator/)**
+**[Live demo](https://rahatm.com/road_simulator/)**
 
 ## Features
 
