@@ -196,12 +196,15 @@ function rebuildRoad() {
   MIN_GAP_METERS = state.minGapCarLengths * CAR_LENGTH;
   state.exitPositions = computeExitPositions(state.numExits, state.roadLength);
 
-  simClock = 0;
-  state.laneSpeedHistory = [];
-  state.events = [];
-  state.chartSampleTimer = 0;
-
-  if (!isInitialBuild) {
+  if (isInitialBuild) {
+    // first-ever build: nothing to preserve yet, start the chart's timeline fresh
+    simClock = 0;
+    state.laneSpeedHistory = [];
+    state.events = [];
+    state.chartSampleTimer = 0;
+  } else {
+    // subsequent rebuilds keep the chart's history going and just mark what changed,
+    // so applying settings never erases what you were already watching
     const changes = diffSettings(before, snapshotSettings());
     if (changes.length > 0) pushEvent('settings', 'Settings changed', changes.join(', '));
   }
@@ -1035,8 +1038,10 @@ document.getElementById('timeScaleInput').addEventListener('input', (e) => {
 document.getElementById('spawnBtn').addEventListener('click', spawnManualCar);
 
 document.getElementById('passingOnlyCheckbox').addEventListener('change', (e) => {
+  const was = state.passingOnly;
   state.passingOnly = e.target.checked;
   populateSpawnLaneOptions();
+  pushEvent('settings', 'Settings changed', `Passing-only lane ${was ? 'On' : 'Off'}→${state.passingOnly ? 'On' : 'Off'}`);
 });
 
 window.addEventListener('resize', () => {
